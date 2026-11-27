@@ -1528,8 +1528,14 @@ class _NewsFeedTabState extends State<_NewsFeedTab> {
 
     var events = provider.newsEvents.where((e) {
       final matchesTournament = e.tournamentId == widget.tournament.id ||
-          (baseLeagueId != null && e.tournamentId == baseLeagueId);
-      final matchesTeam = e.teamId != null && teamIdSet.contains(e.teamId);
+          e.secondaryTournamentId == widget.tournament.id ||
+          (baseLeagueId != null &&
+              (e.tournamentId == baseLeagueId ||
+                  e.secondaryTournamentId == baseLeagueId));
+      final matchesTeam =
+          (e.teamId != null && teamIdSet.contains(e.teamId)) ||
+              (e.secondaryTeamId != null &&
+                  teamIdSet.contains(e.secondaryTeamId));
       return matchesTournament || matchesTeam || e.type == NewsEventType.general;
     }).toList();
 

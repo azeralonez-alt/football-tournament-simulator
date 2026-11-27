@@ -96,10 +96,7 @@ class TeamDetailScreen extends StatelessWidget {
     final teamsById = {for (final t in provider.teams) t.id: t};
     final recentMatches = provider.getTeamRecentMatches(team.id, limit: 5);
     final activeInjuries = provider.getActiveInjuriesForTeam(team.id);
-    final clubNews = provider.newsEvents
-        .where((e) => e.teamId == team.id)
-        .take(15)
-        .toList();
+    final teamNews = provider.getTeamNews(team.id, team.name);
 
     return Scaffold(
       appBar: AppBar(
@@ -162,10 +159,8 @@ class TeamDetailScreen extends StatelessWidget {
             ),
             const SizedBox(height: 14),
             _SeasonHistoryCard(history: team.seasonHistory),
-            if (clubNews.isNotEmpty) ...[
-              const SizedBox(height: 14),
-              _ClubNewsCard(events: clubNews),
-            ],
+            const SizedBox(height: 14),
+            _TeamNewsHistoryCard(events: teamNews),
             const SizedBox(height: 12),
           ],
         ),
@@ -1302,13 +1297,52 @@ class _ActiveInjuryItem extends StatelessWidget {
   }
 }
 
-class _ClubNewsCard extends StatelessWidget {
+class _TeamNewsHistoryCard extends StatefulWidget {
   final List<NewsEvent> events;
 
-  const _ClubNewsCard({required this.events});
+  const _TeamNewsHistoryCard({required this.events});
+
+  @override
+  State<_TeamNewsHistoryCard> createState() => _TeamNewsHistoryCardState();
+}
+
+class _TeamNewsHistoryCardState extends State<_TeamNewsHistoryCard> {
+  static const int _initialLimit = 5;
+
+  String _selectedFilter = 'all'; // 'all', 'transfer', 'injury', 'match'
+  bool _showAll = false;
+
+  List<NewsEvent> get _filteredEvents {
+    switch (_selectedFilter) {
+      case 'transfer':
+        return widget.events
+            .where((e) => e.type == NewsEventType.transferWindow)
+            .toList();
+      case 'injury':
+        return widget.events
+            .where((e) => e.type == NewsEventType.injury)
+            .toList();
+      case 'match':
+        return widget.events
+            .where(
+              (e) =>
+                  e.type == NewsEventType.chaoticMatch ||
+                  e.type == NewsEventType.tournamentResult,
+            )
+            .toList();
+      default:
+        return widget.events;
+    }
+  }
 
   @override
   Widget build(BuildContext context) {
+    final filtered = _filteredEvents;
+    final hasMore = filtered.length > _initialLimit;
+    final visibleEvents = (!_showAll && hasMore)
+        ? filtered.take(_initialLimit).toList()
+        : filtered;
+
     return Container(
       padding: const EdgeInsets.all(14),
       decoration: BoxDecoration(
@@ -1317,52 +1351,247 @@ class _ClubNewsCard extends StatelessWidget {
         border: Border.all(color: AppTheme.borderHairline),
       ),
       child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
+        crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
-          Text('Catatan Klub Musim Ini', style: AppTheme.sectionHeader),
+          Row(
+            children: [
+              Expanded(
+                child: Text('Riwayat Berita', style: AppTheme.sectionHeader),
+              ),
+              Text(
+                '${filtered.length} Catatan',
+                style: AppTheme.badge.copyWith(color: AppTheme.textSecondary),
+              ),
+            ],
+          ),
           const SizedBox(height: 10),
-          for (var i = 0; i < events.length; i++) ...[
-            Row(
-              crossAxisAlignment: CrossAxisAlignment.start,
+          SingleChildScrollView(
+            scrollDirection: Axis.horizontal,
+            child: Row(
               children: [
-                Icon(
-                  events[i].type == NewsEventType.injury
-                      ? ((events[i].ovrDelta ?? 0) > 0
-                          ? Icons.healing_rounded
-                          : Icons.medical_services_rounded)
-                      : events[i].type == NewsEventType.tournamentResult
-                          ? Icons.emoji_events_rounded
-                          : Icons.swap_horiz_rounded,
-                  size: 16,
-                  color: events[i].type == NewsEventType.injury
-                      ? ((events[i].ovrDelta ?? 0) > 0
-                          ? AppTheme.ovrUp
-                          : AppTheme.ovrDown)
-                      : AppTheme.primaryBrand,
+                _NewsFilterChip(
+                  label: 'Semua',
+                  selected: _selectedFilter == 'all',
+                  onTap: () => setState(() {
+                    _selectedFilter = 'all';
+                    _showAll = false;
+                  }),
                 ),
-                const SizedBox(width: 8),
-                Expanded(
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Text(
-                        events[i].title,
-                        style: AppTheme.bodyPrimary.copyWith(fontSize: 12.5),
-                      ),
-                      Text(
-                        events[i].description,
-                        style: AppTheme.body.copyWith(fontSize: 11.5),
-                      ),
-                    ],
-                  ),
+                const SizedBox(width: 6),
+                _NewsFilterChip(
+                  label: 'Transfer & OVR',
+                  selected: _selectedFilter == 'transfer',
+                  onTap: () => setState(() {
+                    _selectedFilter = 'transfer';
+                    _showAll = false;
+                  }),
+                ),
+                const SizedBox(width: 6),
+                _NewsFilterChip(
+                  label: 'Cedera',
+                  selected: _selectedFilter == 'injury',
+                  onTap: () => setState(() {
+                    _selectedFilter = 'injury';
+                    _showAll = false;
+                  }),
+                ),
+                const SizedBox(width: 6),
+                _NewsFilterChip(
+                  label: 'Laga & Juara',
+                  selected: _selectedFilter == 'match',
+                  onTap: () => setState(() {
+                    _selectedFilter = 'match';
+                    _showAll = false;
+                  }),
                 ),
               ],
             ),
-            if (i < events.length - 1)
-              const Divider(height: 14, color: AppTheme.borderHairline),
+          ),
+          const SizedBox(height: 12),
+          if (visibleEvents.isEmpty)
+            Padding(
+              padding: const EdgeInsets.symmetric(vertical: 6),
+              child: Text(
+                widget.events.isEmpty
+                    ? 'Belum ada catatan berita untuk tim ini.'
+                    : 'Tidak ada berita pada kategori ini.',
+                style: AppTheme.body,
+              ),
+            )
+          else ...[
+            for (var i = 0; i < visibleEvents.length; i++) ...[
+              _TeamNewsItemRow(event: visibleEvents[i]),
+              if (i < visibleEvents.length - 1)
+                const Divider(height: 16, color: AppTheme.borderHairline),
+            ],
+            if (hasMore) ...[
+              const SizedBox(height: 10),
+              OutlinedButton.icon(
+                onPressed: () => setState(() => _showAll = !_showAll),
+                icon: Icon(
+                  _showAll
+                      ? Icons.keyboard_arrow_up_rounded
+                      : Icons.keyboard_arrow_down_rounded,
+                  size: 18,
+                ),
+                label: Text(
+                  _showAll
+                      ? 'Tampilkan Lebih Sedikit'
+                      : 'Lihat Semua (${filtered.length})',
+                ),
+              ),
+            ],
           ],
         ],
       ),
+    );
+  }
+}
+
+class _NewsFilterChip extends StatelessWidget {
+  final String label;
+  final bool selected;
+  final VoidCallback onTap;
+
+  const _NewsFilterChip({
+    required this.label,
+    required this.selected,
+    required this.onTap,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return ChoiceChip(
+      label: Text(label),
+      selected: selected,
+      onSelected: (_) => onTap(),
+      selectedColor: AppTheme.primaryBrand,
+      backgroundColor: AppTheme.surfaceSubtle,
+      showCheckmark: false,
+      visualDensity: VisualDensity.compact,
+      labelStyle: AppTheme.caption.copyWith(
+        color: selected ? Colors.white : AppTheme.textSecondary,
+        fontSize: 11.5,
+      ),
+    );
+  }
+}
+
+class _TeamNewsItemRow extends StatelessWidget {
+  final NewsEvent event;
+
+  const _TeamNewsItemRow({required this.event});
+
+  @override
+  Widget build(BuildContext context) {
+    final ({IconData icon, Color color, Color bg, String label}) meta =
+        switch (event.type) {
+      NewsEventType.transferWindow => (
+          icon: Icons.swap_horiz_rounded,
+          color: AppTheme.zoneFederation,
+          bg: const Color(0xFFF3E8FF),
+          label: 'Transfer & OVR',
+        ),
+      NewsEventType.injury => (event.ovrDelta ?? 0) > 0
+          ? (
+              icon: Icons.healing_rounded,
+              color: AppTheme.zoneWinner,
+              bg: const Color(0xFFFFF7ED),
+              label: 'Pemulihan',
+            )
+          : (
+              icon: Icons.medical_services_rounded,
+              color: AppTheme.ovrDown,
+              bg: const Color(0xFFFEF2F2),
+              label: 'Cedera',
+            ),
+      NewsEventType.chaoticMatch => (
+          icon: Icons.local_fire_department_rounded,
+          color: AppTheme.chaoticText,
+          bg: AppTheme.chaoticBg,
+          label: 'Laga Gila',
+        ),
+      NewsEventType.tournamentResult => (
+          icon: Icons.emoji_events_rounded,
+          color: AppTheme.primaryBrand,
+          bg: AppTheme.ovrEliteBg,
+          label: 'Juara',
+        ),
+      NewsEventType.general => (
+          icon: Icons.campaign_rounded,
+          color: AppTheme.secondaryAccent,
+          bg: AppTheme.ovrMidBg,
+          label: 'Info',
+        ),
+    };
+
+    final timeLabel = event.gameweek == 0
+        ? 'Musim ${event.seasonNumber} • Pra-Musim'
+        : 'Musim ${event.seasonNumber} • Pekan ${event.gameweek}';
+
+    return Row(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Container(
+          width: 32,
+          height: 32,
+          decoration: BoxDecoration(
+            color: meta.bg,
+            borderRadius: BorderRadius.circular(8),
+          ),
+          child: Icon(meta.icon, size: 17, color: meta.color),
+        ),
+        const SizedBox(width: 10),
+        Expanded(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Wrap(
+                spacing: 6,
+                runSpacing: 4,
+                crossAxisAlignment: WrapCrossAlignment.center,
+                children: [
+                  Container(
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 7,
+                      vertical: 2,
+                    ),
+                    decoration: BoxDecoration(
+                      color: meta.bg,
+                      borderRadius: BorderRadius.circular(AppTheme.radiusPill),
+                    ),
+                    child: Text(
+                      meta.label,
+                      style: AppTheme.badge.copyWith(
+                        color: meta.color,
+                        fontSize: 10,
+                        fontWeight: FontWeight.w700,
+                      ),
+                    ),
+                  ),
+                  Text(
+                    timeLabel,
+                    style: AppTheme.badge.copyWith(
+                      fontSize: 10.5,
+                      color: AppTheme.textMuted,
+                    ),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 5),
+              Text(
+                event.title,
+                style: AppTheme.cardTitle.copyWith(fontSize: 13),
+              ),
+              const SizedBox(height: 2),
+              Text(
+                event.description,
+                style: AppTheme.body.copyWith(fontSize: 12),
+              ),
+            ],
+          ),
+        ),
+      ],
     );
   }
 }

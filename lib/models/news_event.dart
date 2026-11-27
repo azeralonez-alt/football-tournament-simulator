@@ -25,7 +25,9 @@ class NewsEvent {
   final String title;
   final String description;
   final String? teamId;
+  final String? secondaryTeamId;
   final String? tournamentId;
+  final String? secondaryTournamentId;
   final int? ovrDelta;
   final DateTime timestamp;
 
@@ -37,7 +39,9 @@ class NewsEvent {
     required this.title,
     required this.description,
     this.teamId,
+    this.secondaryTeamId,
     this.tournamentId,
+    this.secondaryTournamentId,
     this.ovrDelta,
     required this.timestamp,
   });
@@ -51,7 +55,9 @@ class NewsEvent {
       title: json['title'] as String,
       description: json['description'] as String,
       teamId: json['teamId'] as String?,
+      secondaryTeamId: json['secondaryTeamId'] as String?,
       tournamentId: json['tournamentId'] as String?,
+      secondaryTournamentId: json['secondaryTournamentId'] as String?,
       ovrDelta: json['ovrDelta'] as int?,
       timestamp: DateTime.parse(json['timestamp'] as String),
     );
@@ -66,7 +72,9 @@ class NewsEvent {
       'title': title,
       'description': description,
       'teamId': teamId,
+      'secondaryTeamId': secondaryTeamId,
       'tournamentId': tournamentId,
+      'secondaryTournamentId': secondaryTournamentId,
       'ovrDelta': ovrDelta,
       'timestamp': timestamp.toIso8601String(),
     };
@@ -80,7 +88,9 @@ class NewsEvent {
     String? title,
     String? description,
     String? teamId,
+    String? secondaryTeamId,
     String? tournamentId,
+    String? secondaryTournamentId,
     int? ovrDelta,
     DateTime? timestamp,
   }) {
@@ -92,7 +102,10 @@ class NewsEvent {
       title: title ?? this.title,
       description: description ?? this.description,
       teamId: teamId ?? this.teamId,
+      secondaryTeamId: secondaryTeamId ?? this.secondaryTeamId,
       tournamentId: tournamentId ?? this.tournamentId,
+      secondaryTournamentId:
+          secondaryTournamentId ?? this.secondaryTournamentId,
       ovrDelta: ovrDelta ?? this.ovrDelta,
       timestamp: timestamp ?? this.timestamp,
     );

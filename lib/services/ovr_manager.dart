@@ -30,10 +30,13 @@ class InjuryProcessResult {
   });
 }
 
-/// Pengelola dinamika Overall Rating (OVR): Transfer Window & Sistem Cedera/Pemulihan Dinamis.
+/// Pengelola dinamika Overall Rating (OVR):
+/// 1. Sistem Ekosistem Transfer Seimbang Lintas Region (Transfer Window).
+/// 2. Sistem Cedera & Pemulihan Dinamis.
 class OvrManager {
   static const double injuryChancePerWeek = 0.015; // 1.5% peluang per pekan
   static const int minTeamOvrAfterInjury = 40;
+  static const int minTeamOvrLimit = 40;
 
   static const List<({String name, int weeks})> _shortInjuries = [
     (name: 'Memar Otot / Benturan', weeks: 1),
@@ -68,68 +71,619 @@ class OvrManager {
       : _random = random ?? Random(),
         _uuid = uuid ?? const Uuid();
 
-  /// Menjalankan Transfer Window (setelah Week 19 atau Akhir Musim).
-  ///
-  /// Distribusi probabilitas sesuai PRD:
-  /// - 70%: -3, -2, -1, +1, +2, +3 (masing-masing ~11.67%)
-  /// - 20%: -4, 0, +4 (masing-masing ~6.67%)
-  /// - 8%: -5, +5 (masing-masing 4%)
-  /// - 2% (Golden Era): +6, +7, +8, +9, +10 (masing-masing 0.4%)
+  /// Menjalankan Sistem Ekosistem Transfer Seimbang Lintas Region:
+  /// - Memilih 35%–50% tim lintas 160 klub (maksimal 1 event utama per tim).
+  /// - Jalur A (~10% event, 1–3 kejadian): Eksodus Massal & Mega Transfer Terpecah.
+  /// - Jalur B (~60% event): Transfer Antar-Klub 1-on-1 Lintas Region (+X / -X).
+  /// - Jalur C (~30% event): Perubahan Organik Seimbang (Promosi Akademi +X / Regenerasi Skuad -X).
   OvrUpdateResult applyTransferWindow({
     required List<Team> teams,
     required int seasonNumber,
     required int gameweek,
     required bool isEndOfSeason,
+    Map<String, String>? leagueNames,
     DateTime? timestamp,
   }) {
     final now = timestamp ?? DateTime.now();
-    final updatedTeams = <Team>[];
-    final events = <NewsEvent>[];
-    final windowLabel =
-        isEndOfSeason ? 'Transfer Window Akhir Musim' : 'Transfer Window Tengah Musim';
+    final windowLabel = isEndOfSeason
+        ? 'Transfer Window Akhir Musim'
+        : 'Transfer Window Tengah Musim';
 
-    for (final team in teams) {
-      final rawDelta = _rollTransferDelta();
-      final newOvr = (team.ovr + rawDelta).clamp(1, 100);
-      final actualDelta = newOvr - team.ovr;
-
-      final updatedTeam = team.copyWith(
-        ovr: newOvr,
-        lastOvrChange: actualDelta,
-        seasonOvrStart: isEndOfSeason ? newOvr : team.seasonOvrStart,
-      );
-      updatedTeams.add(updatedTeam);
-
-      if (actualDelta != 0) {
-        final isGoldenEra = actualDelta >= 6;
-        final sign = actualDelta > 0 ? '+' : '';
-        final title = isGoldenEra
-            ? 'Golden Era! ${team.name} ($sign$actualDelta OVR)'
-            : '$windowLabel: ${team.name} ($sign$actualDelta OVR)';
-        final description = isGoldenEra
-            ? '${team.name} mengalami lonjakan generasi emas di $windowLabel. OVR naik dari ${team.ovr} menjadi $newOvr.'
-            : actualDelta > 0
-                ? 'Rekrutan baru memperkuat ${team.name}. OVR meningkat dari ${team.ovr} menjadi $newOvr ($sign$actualDelta).'
-                : 'Perubahan skuad melemahkan ${team.name}. OVR turun dari ${team.ovr} menjadi $newOvr ($actualDelta).';
-
-        events.add(
-          NewsEvent(
-            id: _uuid.v4(),
-            seasonNumber: seasonNumber,
-            gameweek: gameweek,
-            type: NewsEventType.transferWindow,
-            title: title,
-            description: description,
-            teamId: team.id,
-            tournamentId: team.leagueId,
-            ovrDelta: actualDelta,
-            timestamp: now,
+    // Reset lastOvrChange dan perbarui seasonOvrStart (jika akhir musim) untuk semua tim.
+    final workingTeams = teams
+        .map(
+          (t) => t.copyWith(
+            lastOvrChange: 0,
+            seasonOvrStart: isEndOfSeason ? t.ovr : t.seasonOvrStart,
           ),
-        );
+        )
+        .toList();
+
+    if (workingTeams.length < 2) {
+      return OvrUpdateResult(updatedTeams: workingTeams, events: const []);
+    }
+
+    final indexById = <String, int>{
+      for (var i = 0; i < workingTeams.length; i++) workingTeams[i].id: i,
+    };
+    final usedTeamIds = <String>{};
+    final events = <NewsEvent>[];
+
+    // 1. Seleksi kuota peserta bursa transfer (35%–50% dari total tim).
+    final participationRatio = 0.35 + (_random.nextDouble() * 0.15);
+    final targetActiveTeams =
+        (workingTeams.length * participationRatio).round().clamp(2, workingTeams.length);
+
+    // 2A. Jalur Langka: 1–3 kejadian Eksodus Massal atau Mega Transfer Terpecah.
+    final rareEventCount = workingTeams.length >= 12 ? 1 + _random.nextInt(3) : 0;
+    for (var i = 0; i < rareEventCount; i++) {
+      if (usedTeamIds.length + 3 > targetActiveTeams) break;
+      final preferExodus = _random.nextBool();
+      final applied = preferExodus
+          ? (_runExodusEvent(
+                workingTeams: workingTeams,
+                indexById: indexById,
+                usedTeamIds: usedTeamIds,
+                events: events,
+                seasonNumber: seasonNumber,
+                gameweek: gameweek,
+                isEndOfSeason: isEndOfSeason,
+                windowLabel: windowLabel,
+                leagueNames: leagueNames,
+                now: now,
+              ) ||
+              _runMegaTransferEvent(
+                workingTeams: workingTeams,
+                indexById: indexById,
+                usedTeamIds: usedTeamIds,
+                events: events,
+                seasonNumber: seasonNumber,
+                gameweek: gameweek,
+                isEndOfSeason: isEndOfSeason,
+                windowLabel: windowLabel,
+                leagueNames: leagueNames,
+                now: now,
+              ))
+          : (_runMegaTransferEvent(
+                workingTeams: workingTeams,
+                indexById: indexById,
+                usedTeamIds: usedTeamIds,
+                events: events,
+                seasonNumber: seasonNumber,
+                gameweek: gameweek,
+                isEndOfSeason: isEndOfSeason,
+                windowLabel: windowLabel,
+                leagueNames: leagueNames,
+                now: now,
+              ) ||
+              _runExodusEvent(
+                workingTeams: workingTeams,
+                indexById: indexById,
+                usedTeamIds: usedTeamIds,
+                events: events,
+                seasonNumber: seasonNumber,
+                gameweek: gameweek,
+                isEndOfSeason: isEndOfSeason,
+                windowLabel: windowLabel,
+                leagueNames: leagueNames,
+                now: now,
+              ));
+
+      if (!applied) break;
+    }
+
+    // Alokasi sisa kuota peserta ke Jalur B (~60% event) dan Jalur C (~30% event).
+    // Karena 1 event Jalur B = 2 tim dan 1 event Jalur C = 1 tim (dipasangkan + & -),
+    // proporsi sisa tim menjadi ~80% untuk Jalur B dan ~20% untuk Jalur C.
+    final remainingBudget = max(0, targetActiveTeams - usedTeamIds.length);
+    final oneOnOneCount = ((remainingBudget * 0.80) / 2).floor();
+    final organicPairCount = max(0, ((remainingBudget - (oneOnOneCount * 2)) / 2).floor());
+
+    // 2B. Jalur Utama: Transfer Antar-Klub 1-on-1 Lintas Region.
+    for (var i = 0; i < oneOnOneCount; i++) {
+      final executed = _runOneOnOneCrossRegionTransfer(
+        workingTeams: workingTeams,
+        indexById: indexById,
+        usedTeamIds: usedTeamIds,
+        events: events,
+        seasonNumber: seasonNumber,
+        gameweek: gameweek,
+        isEndOfSeason: isEndOfSeason,
+        windowLabel: windowLabel,
+        leagueNames: leagueNames,
+        now: now,
+      );
+      if (!executed) break;
+    }
+
+    // 2C. Jalur Organik Seimbang: Pasangan Promosi Akademi (+X) & Regenerasi Skuad (-X).
+    for (var i = 0; i < organicPairCount; i++) {
+      final executed = _runBalancedOrganicPair(
+        workingTeams: workingTeams,
+        indexById: indexById,
+        usedTeamIds: usedTeamIds,
+        events: events,
+        seasonNumber: seasonNumber,
+        gameweek: gameweek,
+        isEndOfSeason: isEndOfSeason,
+        windowLabel: windowLabel,
+        now: now,
+      );
+      if (!executed) break;
+    }
+
+    return OvrUpdateResult(updatedTeams: workingTeams, events: events);
+  }
+
+  bool _runExodusEvent({
+    required List<Team> workingTeams,
+    required Map<String, int> indexById,
+    required Set<String> usedTeamIds,
+    required List<NewsEvent> events,
+    required int seasonNumber,
+    required int gameweek,
+    required bool isEndOfSeason,
+    required String windowLabel,
+    required Map<String, String>? leagueNames,
+    required DateTime now,
+  }) {
+    final victimCandidates = workingTeams
+        .where((t) => !usedTeamIds.contains(t.id) && t.ovr >= 65)
+        .toList();
+    if (victimCandidates.isEmpty) return false;
+
+    final victim = victimCandidates[_random.nextInt(victimCandidates.length)];
+    final buyerPool = workingTeams
+        .where((t) =>
+            t.id != victim.id && !usedTeamIds.contains(t.id) && t.ovr <= 96)
+        .toList();
+    if (buyerPool.length < 2) return false;
+
+    var totalPenalty = _rollRareTransferPoints();
+    final maxPossiblePenalty = victim.ovr - minTeamOvrLimit;
+    if (maxPossiblePenalty < 4) return false;
+    totalPenalty = min(totalPenalty, maxPossiblePenalty);
+
+    final minParts = max(2, (totalPenalty / 3.0).ceil());
+    final maxParts = min(4, buyerPool.length);
+    if (maxParts < 2) return false;
+
+    var effectiveParts = minParts;
+    if (maxParts < minParts) {
+      totalPenalty = min(totalPenalty, maxParts * 3);
+      effectiveParts = maxParts;
+    } else {
+      final upper = min(maxParts, totalPenalty);
+      if (upper > minParts) {
+        effectiveParts = minParts + _random.nextInt(upper - minParts + 1);
       }
     }
 
-    return OvrUpdateResult(updatedTeams: updatedTeams, events: events);
+    final buyers = _pickCrossRegionPartners(
+      pool: buyerPool,
+      originLeagueId: victim.leagueId,
+      count: effectiveParts,
+    );
+    if (buyers.length < effectiveParts) return false;
+
+    final parts = _splitPoints(totalPenalty, effectiveParts);
+    final buyerSummaries = <String>[];
+
+    // Terapkan kenaikan ke tim pembeli terlebih dahulu untuk memastikan angka persis.
+    var totalDistributed = 0;
+    for (var i = 0; i < buyers.length; i++) {
+      final buyer = buyers[i];
+      final part = parts[i];
+      final newOvr = min(100, buyer.ovr + part);
+      final actualGain = newOvr - buyer.ovr;
+      totalDistributed += actualGain;
+
+      final bIdx = indexById[buyer.id]!;
+      workingTeams[bIdx] = buyer.copyWith(
+        ovr: newOvr,
+        lastOvrChange: actualGain,
+        seasonOvrStart: isEndOfSeason ? newOvr : buyer.seasonOvrStart,
+      );
+      usedTeamIds.add(buyer.id);
+
+      final buyerLeague = _leagueDisplayName(buyer.leagueId, leagueNames);
+      buyerSummaries.add('${buyer.name} ($buyerLeague +$actualGain)');
+
+      final victimLeague = _leagueDisplayName(victim.leagueId, leagueNames);
+      events.add(
+        NewsEvent(
+          id: _uuid.v4(),
+          seasonNumber: seasonNumber,
+          gameweek: gameweek,
+          type: NewsEventType.transferWindow,
+          title: '$windowLabel: ${buyer.name} (+$actualGain OVR)',
+          description:
+              '${buyer.name} ($buyerLeague) menampung pemain eksodus dari ${victim.name} ($victimLeague). OVR meningkat dari ${buyer.ovr} menjadi $newOvr (+$actualGain).',
+          teamId: buyer.id,
+          tournamentId: buyer.leagueId,
+          ovrDelta: actualGain,
+          timestamp: now,
+        ),
+      );
+    }
+
+    final appliedPenalty = min(totalDistributed, victim.ovr - minTeamOvrLimit);
+    final victimNewOvr = victim.ovr - appliedPenalty;
+    final vIdx = indexById[victim.id]!;
+    workingTeams[vIdx] = victim.copyWith(
+      ovr: victimNewOvr,
+      lastOvrChange: -appliedPenalty,
+      seasonOvrStart: isEndOfSeason ? victimNewOvr : victim.seasonOvrStart,
+    );
+    usedTeamIds.add(victim.id);
+
+    events.add(
+      NewsEvent(
+        id: _uuid.v4(),
+        seasonNumber: seasonNumber,
+        gameweek: gameweek,
+        type: NewsEventType.transferWindow,
+        title: 'Eksodus Besar! ${victim.name} (-$appliedPenalty OVR)',
+        description:
+            '${victim.name} ditinggal sejumlah pemain andalan pada $windowLabel sehingga OVR turun dari ${victim.ovr} menjadi $victimNewOvr (-$appliedPenalty). Para pemainnya ditampung oleh ${buyerSummaries.join(', ')}.',
+        teamId: victim.id,
+        tournamentId: victim.leagueId,
+        ovrDelta: -appliedPenalty,
+        timestamp: now,
+      ),
+    );
+
+    return true;
+  }
+
+  bool _runMegaTransferEvent({
+    required List<Team> workingTeams,
+    required Map<String, int> indexById,
+    required Set<String> usedTeamIds,
+    required List<NewsEvent> events,
+    required int seasonNumber,
+    required int gameweek,
+    required bool isEndOfSeason,
+    required String windowLabel,
+    required Map<String, String>? leagueNames,
+    required DateTime now,
+  }) {
+    final sultanCandidates = workingTeams
+        .where((t) => !usedTeamIds.contains(t.id) && t.ovr <= 90)
+        .toList();
+    if (sultanCandidates.isEmpty) return false;
+
+    final sultan = sultanCandidates[_random.nextInt(sultanCandidates.length)];
+    final sellerPool = workingTeams
+        .where((t) =>
+            t.id != sultan.id && !usedTeamIds.contains(t.id) && t.ovr >= 60)
+        .toList();
+    if (sellerPool.length < 2) return false;
+
+    var totalBonus = _rollRareTransferPoints();
+    final maxPossibleBonus = 100 - sultan.ovr;
+    if (maxPossibleBonus < 4) return false;
+    totalBonus = min(totalBonus, maxPossibleBonus);
+
+    final minParts = max(2, (totalBonus / 3.0).ceil());
+    final maxParts = min(4, sellerPool.length);
+    if (maxParts < 2) return false;
+
+    var effectiveParts = minParts;
+    if (maxParts < minParts) {
+      totalBonus = min(totalBonus, maxParts * 3);
+      effectiveParts = maxParts;
+    } else {
+      final upper = min(maxParts, totalBonus);
+      if (upper > minParts) {
+        effectiveParts = minParts + _random.nextInt(upper - minParts + 1);
+      }
+    }
+
+    final sellers = _pickCrossRegionPartners(
+      pool: sellerPool,
+      originLeagueId: sultan.leagueId,
+      count: effectiveParts,
+    );
+    if (sellers.length < effectiveParts) return false;
+
+    final parts = _splitPoints(totalBonus, effectiveParts);
+    final sellerSummaries = <String>[];
+    final sultanLeague = _leagueDisplayName(sultan.leagueId, leagueNames);
+
+    var totalAcquired = 0;
+    for (var i = 0; i < sellers.length; i++) {
+      final seller = sellers[i];
+      final part = parts[i];
+      final newOvr = max(minTeamOvrLimit, seller.ovr - part);
+      final actualLoss = seller.ovr - newOvr;
+      totalAcquired += actualLoss;
+
+      final sIdx = indexById[seller.id]!;
+      workingTeams[sIdx] = seller.copyWith(
+        ovr: newOvr,
+        lastOvrChange: -actualLoss,
+        seasonOvrStart: isEndOfSeason ? newOvr : seller.seasonOvrStart,
+      );
+      usedTeamIds.add(seller.id);
+
+      final sellerLeague = _leagueDisplayName(seller.leagueId, leagueNames);
+      sellerSummaries.add('${seller.name} ($sellerLeague -$actualLoss)');
+
+      events.add(
+        NewsEvent(
+          id: _uuid.v4(),
+          seasonNumber: seasonNumber,
+          gameweek: gameweek,
+          type: NewsEventType.transferWindow,
+          title: '$windowLabel: ${seller.name} (-$actualLoss OVR)',
+          description:
+              '${seller.name} ($sellerLeague) melepas pemain ke ${sultan.name} ($sultanLeague). OVR turun dari ${seller.ovr} menjadi $newOvr (-$actualLoss).',
+          teamId: seller.id,
+          tournamentId: seller.leagueId,
+          ovrDelta: -actualLoss,
+          timestamp: now,
+        ),
+      );
+    }
+
+    final appliedBonus = min(totalAcquired, 100 - sultan.ovr);
+    final sultanNewOvr = sultan.ovr + appliedBonus;
+    final kIdx = indexById[sultan.id]!;
+    workingTeams[kIdx] = sultan.copyWith(
+      ovr: sultanNewOvr,
+      lastOvrChange: appliedBonus,
+      seasonOvrStart: isEndOfSeason ? sultanNewOvr : sultan.seasonOvrStart,
+    );
+    usedTeamIds.add(sultan.id);
+
+    events.add(
+      NewsEvent(
+        id: _uuid.v4(),
+        seasonNumber: seasonNumber,
+        gameweek: gameweek,
+        type: NewsEventType.transferWindow,
+        title: 'Mega Transfer! ${sultan.name} (+$appliedBonus OVR)',
+        description:
+            '${sultan.name} memborong pemain bintang pada $windowLabel dari ${sellerSummaries.join(', ')}. OVR melonjak dari ${sultan.ovr} menjadi $sultanNewOvr (+$appliedBonus).',
+        teamId: sultan.id,
+        tournamentId: sultan.leagueId,
+        ovrDelta: appliedBonus,
+        timestamp: now,
+      ),
+    );
+
+    return true;
+  }
+
+  bool _runOneOnOneCrossRegionTransfer({
+    required List<Team> workingTeams,
+    required Map<String, int> indexById,
+    required Set<String> usedTeamIds,
+    required List<NewsEvent> events,
+    required int seasonNumber,
+    required int gameweek,
+    required bool isEndOfSeason,
+    required String windowLabel,
+    required Map<String, String>? leagueNames,
+    required DateTime now,
+  }) {
+    final buyerCandidates = workingTeams
+        .where((t) => !usedTeamIds.contains(t.id) && t.ovr <= 97)
+        .toList();
+    if (buyerCandidates.isEmpty) return false;
+
+    final buyer = buyerCandidates[_random.nextInt(buyerCandidates.length)];
+    final allSellerCandidates = workingTeams
+        .where((t) =>
+            t.id != buyer.id && !usedTeamIds.contains(t.id) && t.ovr >= 55)
+        .toList();
+    if (allSellerCandidates.isEmpty) return false;
+
+    // Utamakan pasangan dari region/liga berbeda bila tersedia.
+    final crossRegionSellers = allSellerCandidates
+        .where((t) => t.leagueId != buyer.leagueId)
+        .toList();
+    final sellerPool =
+        crossRegionSellers.isNotEmpty ? crossRegionSellers : allSellerCandidates;
+    final seller = sellerPool[_random.nextInt(sellerPool.length)];
+
+    final rawX = _rollStandardTransferPoints();
+    final maxAllowedGain = 100 - buyer.ovr;
+    final maxAllowedLoss = seller.ovr - minTeamOvrLimit;
+    final actualX = min(rawX, min(maxAllowedGain, maxAllowedLoss));
+    if (actualX <= 0) return false;
+
+    final buyerNewOvr = buyer.ovr + actualX;
+    final sellerNewOvr = seller.ovr - actualX;
+
+    final bIdx = indexById[buyer.id]!;
+    final sIdx = indexById[seller.id]!;
+
+    workingTeams[bIdx] = buyer.copyWith(
+      ovr: buyerNewOvr,
+      lastOvrChange: actualX,
+      seasonOvrStart: isEndOfSeason ? buyerNewOvr : buyer.seasonOvrStart,
+    );
+    workingTeams[sIdx] = seller.copyWith(
+      ovr: sellerNewOvr,
+      lastOvrChange: -actualX,
+      seasonOvrStart: isEndOfSeason ? sellerNewOvr : seller.seasonOvrStart,
+    );
+    usedTeamIds.add(buyer.id);
+    usedTeamIds.add(seller.id);
+
+    final buyerLeague = _leagueDisplayName(buyer.leagueId, leagueNames);
+    final sellerLeague = _leagueDisplayName(seller.leagueId, leagueNames);
+
+    events.add(
+      NewsEvent(
+        id: _uuid.v4(),
+        seasonNumber: seasonNumber,
+        gameweek: gameweek,
+        type: NewsEventType.transferWindow,
+        title:
+            'Transfer Lintas Region: ${buyer.name} (+$actualX OVR) merekrut pemain dari ${seller.name} (-$actualX OVR)',
+        description:
+            '${buyer.name} ($buyerLeague) mendatangkan pemain baru dari ${seller.name} ($sellerLeague) pada $windowLabel. OVR ${buyer.name} naik ${buyer.ovr}→$buyerNewOvr, sedangkan ${seller.name} turun ${seller.ovr}→$sellerNewOvr.',
+        teamId: buyer.id,
+        secondaryTeamId: seller.id,
+        tournamentId: buyer.leagueId,
+        secondaryTournamentId: seller.leagueId,
+        ovrDelta: actualX,
+        timestamp: now,
+      ),
+    );
+
+    return true;
+  }
+
+  bool _runBalancedOrganicPair({
+    required List<Team> workingTeams,
+    required Map<String, int> indexById,
+    required Set<String> usedTeamIds,
+    required List<NewsEvent> events,
+    required int seasonNumber,
+    required int gameweek,
+    required bool isEndOfSeason,
+    required String windowLabel,
+    required DateTime now,
+  }) {
+    final x = _rollStandardTransferPoints();
+
+    final posCandidates = workingTeams
+        .where((t) => !usedTeamIds.contains(t.id) && (100 - t.ovr) >= x)
+        .toList();
+    if (posCandidates.isEmpty) return false;
+    final posTeam = posCandidates[_random.nextInt(posCandidates.length)];
+
+    final negCandidates = workingTeams
+        .where((t) =>
+            t.id != posTeam.id &&
+            !usedTeamIds.contains(t.id) &&
+            (t.ovr - minTeamOvrLimit) >= x)
+        .toList();
+    if (negCandidates.isEmpty) return false;
+    final negTeam = negCandidates[_random.nextInt(negCandidates.length)];
+
+    final posNewOvr = posTeam.ovr + x;
+    final negNewOvr = negTeam.ovr - x;
+
+    final pIdx = indexById[posTeam.id]!;
+    final nIdx = indexById[negTeam.id]!;
+
+    workingTeams[pIdx] = posTeam.copyWith(
+      ovr: posNewOvr,
+      lastOvrChange: x,
+      seasonOvrStart: isEndOfSeason ? posNewOvr : posTeam.seasonOvrStart,
+    );
+    workingTeams[nIdx] = negTeam.copyWith(
+      ovr: negNewOvr,
+      lastOvrChange: -x,
+      seasonOvrStart: isEndOfSeason ? negNewOvr : negTeam.seasonOvrStart,
+    );
+
+    usedTeamIds.add(posTeam.id);
+    usedTeamIds.add(negTeam.id);
+
+    events.add(
+      NewsEvent(
+        id: _uuid.v4(),
+        seasonNumber: seasonNumber,
+        gameweek: gameweek,
+        type: NewsEventType.transferWindow,
+        title: 'Promosi Akademi: ${posTeam.name} (+$x OVR)',
+        description:
+            '${posTeam.name} mengorbitkan talenta muda berbakat dari akademi pada $windowLabel. OVR meningkat dari ${posTeam.ovr} menjadi $posNewOvr (+$x).',
+        teamId: posTeam.id,
+        tournamentId: posTeam.leagueId,
+        ovrDelta: x,
+        timestamp: now,
+      ),
+    );
+
+    events.add(
+      NewsEvent(
+        id: _uuid.v4(),
+        seasonNumber: seasonNumber,
+        gameweek: gameweek,
+        type: NewsEventType.transferWindow,
+        title: 'Regenerasi Skuad: ${negTeam.name} (-$x OVR)',
+        description:
+            'Beberapa pemain senior ${negTeam.name} pensiun atau mengalami penurunan performa pada $windowLabel. OVR turun dari ${negTeam.ovr} menjadi $negNewOvr (-$x).',
+        teamId: negTeam.id,
+        tournamentId: negTeam.leagueId,
+        ovrDelta: -x,
+        timestamp: now,
+      ),
+    );
+
+    return true;
+  }
+
+  /// Memilih [count] tim partner dari [pool] dengan memprioritaskan tim dari
+  /// liga berbeda ([originLeagueId]) agar tercipta perpindahan lintas region.
+  List<Team> _pickCrossRegionPartners({
+    required List<Team> pool,
+    required String originLeagueId,
+    required int count,
+  }) {
+    final differentRegion =
+        pool.where((t) => t.leagueId != originLeagueId).toList()..shuffle(_random);
+    final sameRegion =
+        pool.where((t) => t.leagueId == originLeagueId).toList()..shuffle(_random);
+    final combined = [...differentRegion, ...sameRegion];
+    if (combined.length < count) return [];
+    return combined.take(count).toList();
+  }
+
+  /// Memecah [total] menjadi [parts] bagian bernilai `1..3` yang berjumlah tepat [total].
+  List<int> _splitPoints(int total, int parts) {
+    final result = List<int>.filled(parts, 1);
+    var remaining = total - parts;
+    while (remaining > 0) {
+      final eligibleIndices = <int>[
+        for (var i = 0; i < result.length; i++)
+          if (result[i] < 3) i,
+      ];
+      if (eligibleIndices.isEmpty) break;
+      final chosen = eligibleIndices[_random.nextInt(eligibleIndices.length)];
+      result[chosen]++;
+      remaining--;
+    }
+    return result;
+  }
+
+  String _leagueDisplayName(
+    String leagueId,
+    Map<String, String>? leagueNames,
+  ) {
+    final custom = leagueNames?[leagueId]?.trim();
+    if (custom != null && custom.isNotEmpty) return custom;
+    final letter = leagueId.split('_').last.toUpperCase();
+    return 'Liga $letter';
+  }
+
+  /// Besaran poin langka (Jalur A):
+  /// 4 (40%), 5 (25%), 6 (15%), 7 (10%), 8 (5%), 9 (3%), 10 (2%).
+  int _rollRareTransferPoints() {
+    final roll = _random.nextInt(100);
+    if (roll < 40) return 4;
+    if (roll < 65) return 5;
+    if (roll < 80) return 6;
+    if (roll < 90) return 7;
+    if (roll < 95) return 8;
+    if (roll < 98) return 9;
+    return 10;
+  }
+
+  /// Besaran nilai transfer standar (Jalur B & C):
+  /// 1 OVR (55%), 2 OVR (30%), 3 OVR (15%).
+  int _rollStandardTransferPoints() {
+    final roll = _random.nextInt(100);
+    if (roll < 55) return 1;
+    if (roll < 85) return 2;
+    return 3;
   }
 
   /// Mensimulasikan peluang cedera acak (1.5% per tim) pada suatu pekan dengan
@@ -343,25 +897,5 @@ class OvrManager {
     if (roll < 98.0) return 3;
     if (roll < 99.0) return -4;
     return 4;
-  }
-
-  /// Mengundi nilai perubahan OVR Transfer Window sesuai bobot probabilitas PRD.
-  int _rollTransferDelta() {
-    final roll = _random.nextDouble() * 100.0;
-
-    if (roll < 70.0) {
-      const common = [-3, -2, -1, 1, 2, 3];
-      return common[_random.nextInt(common.length)];
-    }
-    if (roll < 90.0) {
-      const uncommon = [-4, 0, 4];
-      return uncommon[_random.nextInt(uncommon.length)];
-    }
-    if (roll < 98.0) {
-      const rare = [-5, 5];
-      return rare[_random.nextInt(rare.length)];
-    }
-    const goldenEra = [6, 7, 8, 9, 10];
-    return goldenEra[_random.nextInt(goldenEra.length)];
   }
 }

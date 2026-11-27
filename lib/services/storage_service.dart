@@ -1,5 +1,6 @@
 import 'dart:convert';
 
+import 'package:flutter/foundation.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import '../models/active_injury.dart';
@@ -9,6 +10,7 @@ import '../models/season_archive.dart';
 import '../models/standing_row.dart';
 import '../models/team.dart';
 import '../models/tournament.dart';
+import 'local_db.dart' as local_db;
 
 /// Snapshot seluruh data aplikasi untuk penyimpanan lokal dan fitur Export/Import JSON.
 class GameSaveData {
@@ -138,29 +140,37 @@ class GameSaveData {
   }
 }
 
-/// Layanan penyimpanan lokal berbasis SharedPreferences serta Export/Import JSON.
+/// Layanan penyimpanan lokal lintas platform (IndexedDB pada Web dan
+/// SharedPreferences pada Android/iOS/Desktop) serta Export/Import JSON.
 class StorageService {
   static const String _storageKey = 'football_sim_game_state_v1';
 
-  SharedPreferences? _prefs;
-
-  Future<SharedPreferences> _getPrefs() async {
-    return _prefs ??= await SharedPreferences.getInstance();
-  }
-
   /// Menyimpan seluruh state permainan ke penyimpanan lokal dalam format JSON.
   Future<void> saveGameState(GameSaveData data) async {
-    final prefs = await _getPrefs();
     final encoded = jsonEncode(data.toJson());
-    await prefs.setString(_storageKey, encoded);
+    await local_db.writeState(_storageKey, encoded);
   }
 
   /// Memuat state permainan yang tersimpan di penyimpanan lokal, atau null jika belum ada.
+  ///
+  /// Pada platform Web, jika data di IndexedDB masih kosong namun ditemukan
+  /// simpanan lama di SharedPreferences (`localStorage`), data otomatis
+  /// dimigrasikan satu kali ke IndexedDB lalu entri lama dihapus agar kuota
+  /// `localStorage` bersih.
   Future<GameSaveData?> loadGameState() async {
-    final prefs = await _getPrefs();
-    final raw = prefs.getString(_storageKey);
-    if (raw == null || raw.trim().isEmpty) return null;
+    final raw = await local_db.readState(_storageKey);
+    if (raw != null && raw.trim().isNotEmpty) {
+      return _decodeSaveData(raw);
+    }
 
+    if (kIsWeb) {
+      return _migrateLegacyWebStorageIfPresent();
+    }
+
+    return null;
+  }
+
+  GameSaveData? _decodeSaveData(String raw) {
     try {
       final decoded = jsonDecode(raw);
       if (decoded is! Map<String, dynamic>) return null;
@@ -170,10 +180,34 @@ class StorageService {
     }
   }
 
+  Future<GameSaveData?> _migrateLegacyWebStorageIfPresent() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final legacyRaw = prefs.getString(_storageKey);
+      if (legacyRaw == null || legacyRaw.trim().isEmpty) return null;
+
+      final migrated = _decodeSaveData(legacyRaw);
+      if (migrated == null) return null;
+
+      await local_db.writeState(_storageKey, legacyRaw);
+      await prefs.remove(_storageKey);
+      return migrated;
+    } catch (_) {
+      return null;
+    }
+  }
+
   /// Menghapus seluruh data simpanan lokal (untuk Reset Aplikasi).
   Future<void> clearGameState() async {
-    final prefs = await _getPrefs();
-    await prefs.remove(_storageKey);
+    await local_db.deleteState(_storageKey);
+    if (kIsWeb) {
+      try {
+        final prefs = await SharedPreferences.getInstance();
+        await prefs.remove(_storageKey);
+      } catch (_) {
+        // Abaikan jika SharedPreferences web tidak dapat diakses.
+      }
+    }
   }
 
   /// Mengonversi [GameSaveData] menjadi string JSON terformat untuk backup.
@@ -188,8 +222,11 @@ class StorageService {
       return serializeToJsonString(currentData);
     }
 
-    final prefs = await _getPrefs();
-    final raw = prefs.getString(_storageKey);
+    var raw = await local_db.readState(_storageKey);
+    if ((raw == null || raw.trim().isEmpty) && kIsWeb) {
+      final prefs = await SharedPreferences.getInstance();
+      raw = prefs.getString(_storageKey);
+    }
     if (raw == null || raw.trim().isEmpty) {
       throw StateError('Belum ada data tersimpan untuk diekspor.');
     }

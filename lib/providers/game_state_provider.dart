@@ -367,6 +367,52 @@ class GameStateProvider extends ChangeNotifier {
     );
   }
 
+  /// Mengumpulkan seluruh berita ([NewsEvent]) yang berkaitan dengan klub
+  /// [teamId] / [teamName] dari musim aktif ([_newsEvents]) maupun seluruh
+  /// arsip musim sebelumnya ([_archives]), diurutkan dari terbaru ke terlama.
+  List<NewsEvent> getTeamNews(String teamId, String teamName) {
+    final normalizedName = teamName.trim().toLowerCase();
+    final seenIds = <String>{};
+    final result = <NewsEvent>[];
+
+    void collectFrom(List<NewsEvent> source) {
+      for (final e in source) {
+        if (seenIds.contains(e.id)) continue;
+
+        final hasTeamId = e.teamId != null && e.teamId!.isNotEmpty;
+        final hasSecondaryTeamId =
+            e.secondaryTeamId != null && e.secondaryTeamId!.isNotEmpty;
+        final matchesById = (hasTeamId && e.teamId == teamId) ||
+            (hasSecondaryTeamId && e.secondaryTeamId == teamId);
+        final matchesByName = !hasTeamId &&
+            !hasSecondaryTeamId &&
+            normalizedName.isNotEmpty &&
+            (e.title.toLowerCase().contains(normalizedName) ||
+                e.description.toLowerCase().contains(normalizedName));
+
+        if (matchesById || matchesByName) {
+          seenIds.add(e.id);
+          result.add(e);
+        }
+      }
+    }
+
+    collectFrom(_newsEvents);
+    for (final archive in _archives) {
+      collectFrom(archive.newsEvents);
+    }
+
+    result.sort((a, b) {
+      final seasonCmp = b.seasonNumber.compareTo(a.seasonNumber);
+      if (seasonCmp != 0) return seasonCmp;
+      final gwCmp = b.gameweek.compareTo(a.gameweek);
+      if (gwCmp != 0) return gwCmp;
+      return b.timestamp.compareTo(a.timestamp);
+    });
+
+    return result;
+  }
+
   /// Mengembalikan tabel klasemen untuk turnamen tertentu (opsional filter [groupName]).
   List<StandingRow> getStandings(String tournamentId, {String? groupName}) {
     final rows = _standingsByTournament[tournamentId] ?? const [];
@@ -1077,12 +1123,16 @@ class GameStateProvider extends ChangeNotifier {
       seasonNumber: _currentSeason,
       gameweek: 19,
       isEndOfSeason: false,
+      leagueNames: _customTournamentNames,
     );
     _teams = result.updatedTeams;
     for (final event in result.events) {
       _addNewsEvent(event);
     }
     _midSeasonTransferDone = true;
+    if (result.events.isNotEmpty && _isSeasonStarted) {
+      _recalculateAllStandings();
+    }
   }
 
   void _advanceCurrentGameweekIfNeeded() {
@@ -1158,6 +1208,7 @@ class GameStateProvider extends ChangeNotifier {
       seasonNumber: nextSeason,
       gameweek: 0,
       isEndOfSeason: true,
+      leagueNames: _customTournamentNames,
     );
     _teams = transferResult.updatedTeams;
 

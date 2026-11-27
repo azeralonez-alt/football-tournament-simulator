@@ -7,7 +7,6 @@ import '../models/tournament.dart';
 import '../providers/game_state_provider.dart';
 import '../theme/app_theme.dart';
 import '../widgets/h2h_bottom_sheet.dart';
-import '../widgets/match_card.dart';
 import '../widgets/ovr_badge.dart';
 import '../widgets/team_avatar.dart';
 import 'team_detail_screen.dart';
@@ -24,6 +23,7 @@ class _FixtureScreenState extends State<FixtureScreen> {
   int? _viewingGameweek;
   String _categoryFilter = 'all'; // 'all', 'local', 'cup', 'continental'
   String? _selectedTournamentId;
+  final Set<String> _collapsedTournaments = {};
   bool _isSimulating = false;
   bool _isEndingSeason = false;
   bool _hideMidSeasonBanner = false;
@@ -35,12 +35,13 @@ class _FixtureScreenState extends State<FixtureScreen> {
 
   Future<void> _handleSimulateWeek(GameStateProvider provider) async {
     if (_isSimulating) return;
+    final simulatedWeek = provider.currentGameweek;
     setState(() => _isSimulating = true);
     try {
       await provider.simulateCurrentWeek();
       if (mounted) {
         setState(() {
-          _viewingGameweek = provider.currentGameweek;
+          _viewingGameweek = simulatedWeek;
         });
       }
     } finally {
@@ -50,11 +51,72 @@ class _FixtureScreenState extends State<FixtureScreen> {
     }
   }
 
-  Future<void> _handleSimulateSingle(
-    GameStateProvider provider,
-    String matchId,
-  ) async {
-    await provider.simulateSingleMatch(matchId);
+  int _tournamentGroupPriority(Tournament? tournament) {
+    if (tournament == null) return 99;
+    switch (tournament.type) {
+      case TournamentType.localLeague:
+        return 0;
+      case TournamentType.domesticCup:
+        return 1;
+      case TournamentType.continentalLeague:
+      case TournamentType.continentalGroup:
+        return 2;
+    }
+  }
+
+  List<
+      ({
+        String tournamentId,
+        String tournamentName,
+        Tournament? tournament,
+        List<MatchGame> matches,
+      })> _groupMatchesByTournament(
+    List<MatchGame> matches,
+    Map<String, Tournament> tournamentsById,
+  ) {
+    final grouped = <String, List<MatchGame>>{};
+    for (final m in matches) {
+      grouped.putIfAbsent(m.tournamentId, () => []).add(m);
+    }
+
+    final result = grouped.entries.map((entry) {
+      final t = tournamentsById[entry.key];
+      final list = List<MatchGame>.from(entry.value)
+        ..sort((a, b) {
+          final grpCmp = (a.groupName ?? '').compareTo(b.groupName ?? '');
+          if (grpCmp != 0) return grpCmp;
+          final slotCmp = (a.bracketSlot ?? 0).compareTo(b.bracketSlot ?? 0);
+          if (slotCmp != 0) return slotCmp;
+          return a.leg.compareTo(b.leg);
+        });
+
+      final name = (t?.name.isNotEmpty == true)
+          ? t!.name
+          : (list.first.tournamentName.isNotEmpty
+              ? list.first.tournamentName
+              : 'Kompetisi');
+
+      return (
+        tournamentId: entry.key,
+        tournamentName: name,
+        tournament: t,
+        matches: list,
+      );
+    }).toList();
+
+    result.sort((a, b) {
+      final pA = _tournamentGroupPriority(a.tournament);
+      final pB = _tournamentGroupPriority(b.tournament);
+      if (pA != pB) return pA.compareTo(pB);
+
+      final idxA = a.tournament?.leagueIndex ?? a.tournament?.tier ?? 99;
+      final idxB = b.tournament?.leagueIndex ?? b.tournament?.tier ?? 99;
+      if (idxA != idxB) return idxA.compareTo(idxB);
+
+      return a.tournamentName.compareTo(b.tournamentName);
+    });
+
+    return result;
   }
 
   Future<void> _handleEndSeason(GameStateProvider provider) async {
@@ -428,7 +490,11 @@ class _FixtureScreenState extends State<FixtureScreen> {
               if (!match.isFinished)
                 ElevatedButton.icon(
                   onPressed: () {
+                    final matchWeek = match.gameweek;
                     Navigator.of(sheetContext).pop();
+                    if (_viewingGameweek == null) {
+                      setState(() => _viewingGameweek = matchWeek);
+                    }
                     provider.simulateSingleMatch(match.id);
                   },
                   icon: const Icon(Icons.play_arrow_rounded),
@@ -487,6 +553,11 @@ class _FixtureScreenState extends State<FixtureScreen> {
         provider.midSeasonTransferDone &&
         (viewingWeek == 19 || viewingWeek == 20);
 
+    final groupedMatches = _groupMatchesByTournament(
+      filteredMatches,
+      tournamentsById,
+    );
+
     return Column(
       children: [
         _buildTopControlPanel(
@@ -515,7 +586,7 @@ class _FixtureScreenState extends State<FixtureScreen> {
                 ),
                 const SizedBox(height: 12),
               ],
-              if (filteredMatches.isEmpty)
+              if (groupedMatches.isEmpty)
                 Container(
                   padding: const EdgeInsets.all(24),
                   decoration: BoxDecoration(
@@ -547,36 +618,39 @@ class _FixtureScreenState extends State<FixtureScreen> {
                   ),
                 )
               else
-                for (var i = 0; i < filteredMatches.length; i++) ...[
-                  MatchCard(
-                    match: filteredMatches[i],
-                    homeTeam: teamsById[filteredMatches[i].homeTeamId],
-                    awayTeam: teamsById[filteredMatches[i].awayTeamId],
-                    showTournamentBadge: true,
-                    probabilities: filteredMatches[i].isFinished
-                        ? null
-                        : provider.getMatchProbabilities(filteredMatches[i]),
-                    onSimulate: filteredMatches[i].isFinished
-                        ? null
-                        : () => _handleSimulateSingle(
-                              provider,
-                              filteredMatches[i].id,
-                            ),
-                    onHeadToHead: () => showHeadToHeadBottomSheet(
-                      context,
-                      teamAId: filteredMatches[i].homeTeamId,
-                      teamBId: filteredMatches[i].awayTeamId,
+                for (var i = 0; i < groupedMatches.length; i++) ...[
+                  _TournamentMatchesGroupCard(
+                    tournament: groupedMatches[i].tournament,
+                    tournamentName: groupedMatches[i].tournamentName,
+                    matches: groupedMatches[i].matches,
+                    teamsById: teamsById,
+                    isCollapsed: _collapsedTournaments.contains(
+                      groupedMatches[i].tournamentId,
                     ),
-                    onTap: () => _openMatchDetailSheet(
+                    onToggleCollapse: () {
+                      final tId = groupedMatches[i].tournamentId;
+                      setState(() {
+                        if (_collapsedTournaments.contains(tId)) {
+                          _collapsedTournaments.remove(tId);
+                        } else {
+                          _collapsedTournaments.add(tId);
+                        }
+                      });
+                    },
+                    onTapMatch: (match) => _openMatchDetailSheet(
                       context,
                       provider,
-                      filteredMatches[i],
-                      teamsById[filteredMatches[i].homeTeamId],
-                      teamsById[filteredMatches[i].awayTeamId],
+                      match,
+                      teamsById[match.homeTeamId],
+                      teamsById[match.awayTeamId],
+                    ),
+                    onTapH2H: (match) => showHeadToHeadBottomSheet(
+                      context,
+                      teamAId: match.homeTeamId,
+                      teamBId: match.awayTeamId,
                     ),
                   ),
-                  if (i < filteredMatches.length - 1)
-                    const SizedBox(height: 10),
+                  if (i < groupedMatches.length - 1) const SizedBox(height: 14),
                 ],
             ],
           ),
@@ -689,40 +763,11 @@ class _FixtureScreenState extends State<FixtureScreen> {
           const SizedBox(height: 10),
           SizedBox(
             height: 42,
-            child: provider.isCurrentSeasonCompleted
-                ? ElevatedButton.icon(
-                    onPressed:
-                        _isEndingSeason ? null : () => _handleEndSeason(provider),
-                    style: ElevatedButton.styleFrom(
-                      backgroundColor: AppTheme.secondaryAccent,
-                    ),
-                    icon: const Icon(Icons.flag_rounded, size: 18),
-                    label: Text(
-                      _isEndingSeason
-                          ? 'Menyiapkan Musim Baru...'
-                          : 'Akhiri Musim & Lanjut Musim Berikutnya',
-                    ),
-                  )
-                : ElevatedButton.icon(
-                    onPressed: (_isSimulating || !hasPendingInActiveWeek)
-                        ? null
-                        : () => _handleSimulateWeek(provider),
-                    icon: _isSimulating
-                        ? const SizedBox(
-                            width: 16,
-                            height: 16,
-                            child: CircularProgressIndicator(
-                              strokeWidth: 2,
-                              color: Colors.white,
-                            ),
-                          )
-                        : const Icon(Icons.bolt_rounded, size: 18),
-                    label: Text(
-                      _isSimulating
-                          ? 'Mensimulasikan...'
-                          : 'Simulate Pekan Ini (Pekan ${provider.currentGameweek})',
-                    ),
-                  ),
+            child: _buildPrimaryActionButton(
+              provider: provider,
+              viewingWeek: viewingWeek,
+              hasPendingInActiveWeek: hasPendingInActiveWeek,
+            ),
           ),
           const SizedBox(height: 10),
           SingleChildScrollView(
@@ -798,6 +843,480 @@ class _FixtureScreenState extends State<FixtureScreen> {
             ),
           ),
         ],
+      ),
+    );
+  }
+
+  Widget _buildPrimaryActionButton({
+    required GameStateProvider provider,
+    required int viewingWeek,
+    required bool hasPendingInActiveWeek,
+  }) {
+    final activeWeek = provider.currentGameweek;
+
+    // Kondisi A: Pekan terakhir dan seluruh pertandingan musim ini telah selesai.
+    if (provider.isCurrentSeasonCompleted && viewingWeek >= activeWeek) {
+      return ElevatedButton.icon(
+        onPressed: _isEndingSeason ? null : () => _handleEndSeason(provider),
+        style: ElevatedButton.styleFrom(
+          backgroundColor: AppTheme.zoneChallenger,
+          foregroundColor: Colors.white,
+        ),
+        icon: const Icon(Icons.flag_rounded, size: 18),
+        label: Text(
+          _isEndingSeason
+              ? 'Menyiapkan Musim Baru...'
+              : 'Akhiri Musim & Lanjut Musim Berikutnya',
+        ),
+      );
+    }
+
+    // Kondisi B: Pekan yang sedang dilihat sudah selesai (lebih kecil dari pekan aktif).
+    if (viewingWeek < activeWeek) {
+      final nextWeek = (viewingWeek + 1).clamp(1, GameStateProvider.maxGameweek);
+      final isNextActive = nextWeek == activeWeek;
+      return ElevatedButton.icon(
+        onPressed: _isSimulating
+            ? null
+            : () => setState(() => _viewingGameweek = nextWeek),
+        style: ElevatedButton.styleFrom(
+          backgroundColor: Colors.blue.shade700,
+          foregroundColor: Colors.white,
+        ),
+        icon: const Icon(Icons.arrow_forward_rounded, size: 18),
+        label: Text(
+          isNextActive
+              ? 'Lanjut ke Pekan $nextWeek (Pekan Aktif)'
+              : 'Lanjut ke Pekan $nextWeek',
+        ),
+      );
+    }
+
+    // Kondisi D (pengaman): Jika user melihat pekan mendatang (> pekan aktif).
+    if (viewingWeek > activeWeek) {
+      return OutlinedButton.icon(
+        onPressed: () => setState(() => _viewingGameweek = activeWeek),
+        icon: const Icon(Icons.arrow_back_rounded, size: 18),
+        label: Text('Kembali ke Pekan Aktif (Pekan $activeWeek)'),
+      );
+    }
+
+    // Kondisi C: Berada di pekan aktif yang siap disimulasikan.
+    return ElevatedButton.icon(
+      onPressed: (_isSimulating || !hasPendingInActiveWeek)
+          ? null
+          : () => _handleSimulateWeek(provider),
+      style: ElevatedButton.styleFrom(
+        backgroundColor: AppTheme.primaryBrand,
+        foregroundColor: Colors.white,
+      ),
+      icon: _isSimulating
+          ? const SizedBox(
+              width: 16,
+              height: 16,
+              child: CircularProgressIndicator(
+                strokeWidth: 2,
+                color: Colors.white,
+              ),
+            )
+          : const Icon(Icons.bolt_rounded, size: 18),
+      label: Text(
+        _isSimulating
+            ? 'Mensimulasikan...'
+            : 'Simulate Pekan Ini (Pekan $viewingWeek)',
+      ),
+    );
+  }
+}
+
+class _TournamentMatchesGroupCard extends StatelessWidget {
+  final Tournament? tournament;
+  final String tournamentName;
+  final List<MatchGame> matches;
+  final Map<String, Team> teamsById;
+  final bool isCollapsed;
+  final VoidCallback onToggleCollapse;
+  final ValueChanged<MatchGame> onTapMatch;
+  final ValueChanged<MatchGame> onTapH2H;
+
+  const _TournamentMatchesGroupCard({
+    required this.tournament,
+    required this.tournamentName,
+    required this.matches,
+    required this.teamsById,
+    required this.isCollapsed,
+    required this.onToggleCollapse,
+    required this.onTapMatch,
+    required this.onTapH2H,
+  });
+
+  ({IconData icon, Color color}) _headerIcon() {
+    if (tournament == null || tournament!.type == TournamentType.localLeague) {
+      return (icon: Icons.shield_outlined, color: AppTheme.primaryBrand);
+    }
+    if (tournament!.type == TournamentType.domesticCup) {
+      return (
+        icon: Icons.emoji_events_outlined,
+        color: AppTheme.zoneChallenger,
+      );
+    }
+    return (
+      icon: Icons.emoji_events_outlined,
+      color: AppTheme.secondaryAccent,
+    );
+  }
+
+  String _stageSummary() {
+    if (matches.isEmpty) return '';
+    final stages = matches.map((m) => m.stageName).toSet();
+    final String baseStage;
+    if (stages.length == 1) {
+      baseStage = stages.first;
+    } else if (matches.every((m) => m.groupName != null)) {
+      baseStage = 'Fase Grup';
+    } else {
+      baseStage = 'Pekan ${matches.first.gameweek}';
+    }
+    final isNeutral = matches.any((m) => m.isNeutralVenue);
+    return isNeutral ? '$baseStage • Netral' : baseStage;
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final iconMeta = _headerIcon();
+    final stageInfo = _stageSummary();
+
+    return Container(
+      decoration: BoxDecoration(
+        color: AppTheme.surfaceCard,
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: AppTheme.borderHairline, width: 1),
+      ),
+      clipBehavior: Clip.antiAlias,
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          Material(
+            color: AppTheme.surfaceSubtle,
+            child: InkWell(
+              onTap: onToggleCollapse,
+              child: Padding(
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 12,
+                  vertical: 10,
+                ),
+                child: Row(
+                  children: [
+                    Icon(iconMeta.icon, size: 18, color: iconMeta.color),
+                    const SizedBox(width: 8),
+                    Expanded(
+                      child: Row(
+                        children: [
+                          Flexible(
+                            child: Text(
+                              tournamentName,
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                              style: AppTheme.cardTitle.copyWith(
+                                fontWeight: FontWeight.w700,
+                              ),
+                            ),
+                          ),
+                          if (stageInfo.isNotEmpty) ...[
+                            const SizedBox(width: 8),
+                            Container(
+                              padding: const EdgeInsets.symmetric(
+                                horizontal: 7,
+                                vertical: 2,
+                              ),
+                              decoration: BoxDecoration(
+                                color: AppTheme.surfaceCard,
+                                borderRadius:
+                                    BorderRadius.circular(AppTheme.radiusPill),
+                                border: Border.all(
+                                  color: AppTheme.borderHairline,
+                                ),
+                              ),
+                              child: Text(
+                                stageInfo,
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
+                                style: AppTheme.badge.copyWith(
+                                  fontSize: 10.5,
+                                  color: AppTheme.textSecondary,
+                                ),
+                              ),
+                            ),
+                          ],
+                        ],
+                      ),
+                    ),
+                    const SizedBox(width: 8),
+                    Text(
+                      '${matches.length} Laga',
+                      style: AppTheme.badge.copyWith(
+                        fontSize: 11,
+                        color: AppTheme.textSecondary,
+                      ),
+                    ),
+                    const SizedBox(width: 4),
+                    Icon(
+                      isCollapsed
+                          ? Icons.keyboard_arrow_down
+                          : Icons.keyboard_arrow_up,
+                      size: 20,
+                      color: AppTheme.textSecondary,
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          ),
+          if (!isCollapsed) ...[
+            const Divider(
+              height: 1,
+              thickness: 0.6,
+              color: AppTheme.borderHairline,
+            ),
+            for (var i = 0; i < matches.length; i++) ...[
+              _CompactTournamentMatchRow(
+                match: matches[i],
+                homeTeam: teamsById[matches[i].homeTeamId],
+                awayTeam: teamsById[matches[i].awayTeamId],
+                onTap: () => onTapMatch(matches[i]),
+                onTapH2H: () => onTapH2H(matches[i]),
+              ),
+              if (i < matches.length - 1)
+                const Divider(
+                  height: 1,
+                  thickness: 0.6,
+                  color: AppTheme.borderHairline,
+                ),
+            ],
+          ],
+        ],
+      ),
+    );
+  }
+}
+
+class _CompactTournamentMatchRow extends StatelessWidget {
+  final MatchGame match;
+  final Team? homeTeam;
+  final Team? awayTeam;
+  final VoidCallback onTap;
+  final VoidCallback onTapH2H;
+
+  const _CompactTournamentMatchRow({
+    required this.match,
+    required this.homeTeam,
+    required this.awayTeam,
+    required this.onTap,
+    required this.onTapH2H,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final homeName = homeTeam?.name ?? 'Tim Home';
+    final awayName = awayTeam?.name ?? 'Tim Away';
+    final homeWon =
+        match.isFinished && match.winnerTeamId == match.homeTeamId;
+    final awayWon =
+        match.isFinished && match.winnerTeamId == match.awayTeamId;
+
+    return InkWell(
+      onTap: onTap,
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+        child: Row(
+          children: [
+            Container(
+              width: 28,
+              padding: const EdgeInsets.symmetric(vertical: 3),
+              decoration: BoxDecoration(
+                color: match.isFinished
+                    ? AppTheme.surfaceSubtle
+                    : AppTheme.ovrEliteBg,
+                borderRadius: BorderRadius.circular(6),
+              ),
+              alignment: Alignment.center,
+              child: Text(
+                match.isFinished ? 'FT' : 'VS',
+                style: AppTheme.badge.copyWith(
+                  fontSize: 10,
+                  fontWeight: FontWeight.w700,
+                  color: match.isFinished
+                      ? AppTheme.textSecondary
+                      : AppTheme.ovrEliteText,
+                ),
+              ),
+            ),
+            const SizedBox(width: 8),
+            Expanded(
+              child: Row(
+                children: [
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.end,
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Text(
+                          homeName,
+                          textAlign: TextAlign.right,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: AppTheme.cardTitle.copyWith(
+                            fontSize: 13,
+                            fontWeight:
+                                homeWon ? FontWeight.w700 : FontWeight.w600,
+                            color: match.isFinished && !homeWon && awayWon
+                                ? AppTheme.textSecondary
+                                : AppTheme.textPrimary,
+                          ),
+                        ),
+                        if (homeTeam != null)
+                          Text(
+                            'OVR ${homeTeam!.ovr}',
+                            style: AppTheme.badge.copyWith(
+                              fontSize: 10,
+                              color: AppTheme.textMuted,
+                            ),
+                          ),
+                      ],
+                    ),
+                  ),
+                  const SizedBox(width: 8),
+                  TeamAvatar(
+                    name: homeName,
+                    logoPath: homeTeam?.logoPath,
+                    colorValue: homeTeam?.colorValue ?? 0xFF1D4ED8,
+                    size: 24,
+                  ),
+                  SizedBox(
+                    width: 64,
+                    child: Column(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Text(
+                          match.isFinished
+                              ? '${match.homeScore ?? 0} - ${match.awayScore ?? 0}'
+                              : '- : -',
+                          textAlign: TextAlign.center,
+                          style: match.isFinished
+                              ? AppTheme.matchScore.copyWith(fontSize: 14.5)
+                              : AppTheme.tabularNumberBold.copyWith(
+                                  fontSize: 13,
+                                  color: AppTheme.textMuted,
+                                ),
+                        ),
+                        if (match.hasPenaltyShootout) ...[
+                          const SizedBox(height: 2),
+                          Container(
+                            padding: const EdgeInsets.symmetric(
+                              horizontal: 5,
+                              vertical: 1,
+                            ),
+                            decoration: BoxDecoration(
+                              color: AppTheme.ovrMidBg,
+                              borderRadius: BorderRadius.circular(
+                                AppTheme.radiusPill,
+                              ),
+                            ),
+                            child: Text(
+                              'Pen ${match.homePenaltyScore}-${match.awayPenaltyScore}',
+                              style: AppTheme.badge.copyWith(
+                                fontSize: 9,
+                                color: AppTheme.secondaryAccent,
+                                fontWeight: FontWeight.w700,
+                              ),
+                            ),
+                          ),
+                        ],
+                      ],
+                    ),
+                  ),
+                  TeamAvatar(
+                    name: awayName,
+                    logoPath: awayTeam?.logoPath,
+                    colorValue: awayTeam?.colorValue ?? 0xFF00A859,
+                    size: 24,
+                  ),
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Text(
+                          awayName,
+                          textAlign: TextAlign.left,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: AppTheme.cardTitle.copyWith(
+                            fontSize: 13,
+                            fontWeight:
+                                awayWon ? FontWeight.w700 : FontWeight.w600,
+                            color: match.isFinished && !awayWon && homeWon
+                                ? AppTheme.textSecondary
+                                : AppTheme.textPrimary,
+                          ),
+                        ),
+                        if (awayTeam != null)
+                          Text(
+                            'OVR ${awayTeam!.ovr}',
+                            style: AppTheme.badge.copyWith(
+                              fontSize: 10,
+                              color: AppTheme.textMuted,
+                            ),
+                          ),
+                      ],
+                    ),
+                  ),
+                ],
+              ),
+            ),
+            const SizedBox(width: 8),
+            Material(
+              color: AppTheme.ovrMidBg,
+              borderRadius: BorderRadius.circular(AppTheme.radiusPill),
+              child: InkWell(
+                onTap: onTapH2H,
+                borderRadius: BorderRadius.circular(AppTheme.radiusPill),
+                child: Container(
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 7,
+                    vertical: 4,
+                  ),
+                  decoration: BoxDecoration(
+                    borderRadius: BorderRadius.circular(AppTheme.radiusPill),
+                    border: Border.all(
+                      color: AppTheme.secondaryAccent.withValues(alpha: 0.25),
+                    ),
+                  ),
+                  child: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      const Icon(
+                        Icons.compare_arrows,
+                        size: 12,
+                        color: AppTheme.secondaryAccent,
+                      ),
+                      const SizedBox(width: 2),
+                      Text(
+                        'H2H',
+                        style: AppTheme.badge.copyWith(
+                          color: AppTheme.secondaryAccent,
+                          fontSize: 10,
+                          fontWeight: FontWeight.w700,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            ),
+          ],
+        ),
       ),
     );
   }
